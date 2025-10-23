@@ -1,0 +1,18 @@
+# Vosk model files (can be large, should be downloaded locally)
+models/vosk-model-*
+models/*.zip
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# ROS build artifacts
+build/
+install/
+log/
+
+# Temporary files
+*.tmp
+*.swp
+*~

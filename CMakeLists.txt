@@ -45,6 +45,7 @@ install(PROGRAMS
 install(DIRECTORY
   config
   launch
+  models
   DESTINATION share/${PROJECT_NAME}/
 )
 

@@ -17,13 +17,83 @@
 # limitations under the License.
 #
 
-import rclpy, json, argparse, queue
+import rclpy, json, argparse, queue, os, sys, zipfile
 from rclpy.node import Node
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, String, Int8MultiArray
 from rcl_interfaces.msg import SetParametersResult
 from voskros.srv import SetGrammar
 from vosk import Model, KaldiRecognizer
 import sounddevice as sd
+from pathlib import Path
+import yaml
+
+def download_model(model_name, models_dir):
+    """Download a model from the official Vosk site if it doesn't exist.
+    
+    Args:
+        model_name: Name of the model (e.g., 'vosk-model-small-en-us-0.15')
+        models_dir: Path to the models directory
+    
+    Returns:
+        Path to the model directory
+    """
+    import urllib.request
+    import tempfile
+    
+    model_path = models_dir / model_name
+    if model_path.exists():
+        return model_path
+    
+    # Common model URLs - this is a simplified mapping
+    # In production, you might want to parse the models page or maintain a complete list
+    model_urls = {
+        'en-us': 'https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip',
+        'en': 'https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip',
+        'fr': 'https://alphacephei.com/vosk/models/vosk-model-small-fr-0.22.zip',
+        'de': 'https://alphacephei.com/vosk/models/vosk-model-small-de-0.15.zip',
+        'es': 'https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip',
+        'it': 'https://alphacephei.com/vosk/models/vosk-model-small-it-0.22.zip',
+        'ru': 'https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip',
+        'zh': 'https://alphacephei.com/vosk/models/vosk-model-small-cn-0.22.zip',
+    }
+    
+    # Try to find URL for this model
+    url = None
+    if model_name in model_urls:
+        url = model_urls[model_name]
+        actual_model_name = url.split('/')[-1].replace('.zip', '')
+    else:
+        # Assume model_name is the full model name and construct URL
+        url = f'https://alphacephei.com/vosk/models/{model_name}.zip'
+        actual_model_name = model_name
+    
+    print(f"Downloading model from {url}...")
+    models_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Download to temporary file
+    with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as tmp_file:
+        tmp_path = tmp_file.name
+        try:
+            urllib.request.urlretrieve(url, tmp_path)
+            
+            # Extract the zip file
+            print(f"Extracting model to {models_dir}...")
+            with zipfile.ZipFile(tmp_path, 'r') as zip_ref:
+                zip_ref.extractall(models_dir)
+            
+            # The extracted folder might have a different name
+            extracted_path = models_dir / actual_model_name
+            if extracted_path.exists():
+                # Rename to the requested model name if different
+                if actual_model_name != model_name:
+                    extracted_path.rename(model_path)
+                return model_path if model_path.exists() else extracted_path
+            else:
+                raise Exception(f"Model extraction failed: {actual_model_name} not found in {models_dir}")
+                
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
 
 class VoskNode(Node):
 
@@ -32,58 +102,212 @@ class VoskNode(Node):
 
         self.declare_parameter('device', '')
         self.declare_parameter('model', 'en-us')
-        self.declare_parameter('samplerate', 0)
+        self.declare_parameter('samplerate', 16000)
         self.declare_parameter('supress', False)
         self.declare_parameter('grammar', '')
+        self.declare_parameter('audio_topics', [])
+        self.declare_parameter('models_dir', '')
 
         self.device     = self.get_parameter('device').get_parameter_value().string_value
-        self.model      = self.get_parameter('model').get_parameter_value().string_value
+        self.model_name = self.get_parameter('model').get_parameter_value().string_value
         self.samplerate = self.get_parameter('samplerate').get_parameter_value().integer_value
         self.supress    = self.get_parameter('supress').get_parameter_value().bool_value
         self.grammar    = self.get_parameter('grammar').get_parameter_value().string_value
+        self.audio_topics = self.get_parameter('audio_topics').get_parameter_value().string_array_value
+        self.models_dir_param = self.get_parameter('models_dir').get_parameter_value().string_value
+        
+        # Determine models directory
+        if self.models_dir_param:
+            self.models_dir = Path(self.models_dir_param)
+        else:
+            # Default to models/ in the package share directory or workspace
+            self.models_dir = Path(__file__).parent.parent / 'models'
         
         self.sub_supress = self.create_subscription(Bool, 'supress', self.supress_callback, 10)
         self.pub_result = self.create_publisher(String, 'result', 10)
-        self.pub_parcial = self.create_publisher(String, 'partial', 10)
 
         self.add_on_set_parameters_callback(self.parameter_callback)
 
         self.srv_grammar = self.create_service(SetGrammar, 
             'set_grammar', self.set_grammar_callback)
 
-        # Startup Vosk
-
-        self.queue = queue.Queue()
-
+        # Initialize recognizers for each audio topic
+        self.recognizers = {}
+        self.audio_queues = {}
+        
+        # Load the model from local directory
         try:
-            if not self.device: self.device = None
+            model_path = self.load_model(self.model_name)
+            self.model = Model(model_path=str(model_path))
+            self.get_logger().info(f'Loaded model from: {model_path}')
+        except Exception as e:
+            self.get_logger().error(f'Failed to load model: {e}')
+            raise
+
+        # Setup audio processing
+        self.setup_audio_processing()
+
+    def load_model(self, model_name):
+        """Load model from local models directory, download if necessary.
+        
+        Args:
+            model_name: Name of the model to load
+            
+        Returns:
+            Path to the model directory
+        """
+        # Check if model exists in models directory
+        model_path = self.models_dir / model_name
+        
+        # Also check for the full model name with version
+        if not model_path.exists():
+            # List existing models in directory
+            if self.models_dir.exists():
+                existing = list(self.models_dir.glob(f'*{model_name}*'))
+                if existing:
+                    model_path = existing[0]
+                    self.get_logger().info(f'Found existing model: {model_path.name}')
+        
+        if not model_path.exists():
+            self.get_logger().info(f'Model {model_name} not found in {self.models_dir}')
+            try:
+                model_path = download_model(model_name, self.models_dir)
+                self.get_logger().info(f'Successfully downloaded model to {model_path}')
+            except Exception as e:
+                self.get_logger().error(f'Failed to download model: {e}')
+                self.get_logger().info(f'Please manually download the model from https://alphacephei.com/vosk/models')
+                self.get_logger().info(f'and extract it to {self.models_dir}/{model_name}')
+                raise
+        
+        return model_path
+    
+    def setup_audio_processing(self):
+        """Setup audio processing - either from microphone or from ROS topics."""
+        if self.audio_topics:
+            # Subscribe to multiple audio topics
+            self.get_logger().info(f'Subscribing to audio topics: {self.audio_topics}')
+            for topic in self.audio_topics:
+                self.create_audio_subscription(topic)
+            
+            # Start processing loop for topic-based audio
+            self.timer = self.create_timer(0.01, self.process_audio_queues)
+        else:
+            # Use microphone input (original behavior)
+            self.get_logger().info('Using microphone input')
+            self.queue = queue.Queue()
+            self.process_microphone()
+    
+    def create_audio_subscription(self, topic):
+        """Create a subscription for an audio topic.
+        
+        Args:
+            topic: Name of the audio topic
+        """
+        # Create a recognizer for this topic
+        if self.grammar:
+            rec = KaldiRecognizer(self.model, self.samplerate, self.grammar)
+        else:
+            rec = KaldiRecognizer(self.model, self.samplerate)
+        
+        self.recognizers[topic] = rec
+        self.audio_queues[topic] = queue.Queue()
+        
+        # Subscribe to the audio topic
+        # Using Int8MultiArray as a generic audio data type
+        # In a real implementation, you might use audio_common_msgs/AudioData
+        def audio_callback(msg, topic_name=topic):
+            if not self.supress:
+                # Convert Int8MultiArray to bytes
+                data = bytes(msg.data)
+                self.audio_queues[topic_name].put(data)
+        
+        self.create_subscription(
+            Int8MultiArray,
+            topic,
+            lambda msg: audio_callback(msg, topic),
+            10
+        )
+        
+        self.get_logger().info(f'Subscribed to audio topic: {topic}')
+    
+    def process_audio_queues(self):
+        """Process audio data from all topic queues."""
+        for topic, audio_queue in self.audio_queues.items():
+            if audio_queue.empty():
+                continue
+            
+            try:
+                data = audio_queue.get_nowait()
+                rec = self.recognizers[topic]
+                
+                if rec.AcceptWaveform(data):
+                    result = json.loads(rec.Result())
+                    self.publish_result_with_confidence(result, topic)
+                    
+                    # Update grammar if needed
+                    if self.grammar:
+                        try:
+                            obj = json.loads(self.grammar)
+                            if isinstance(obj, list):
+                                rec.SetGrammar(self.grammar)
+                            else:
+                                self.get_logger().warn('Param grammar is not a valid JSON array!')
+                        except:
+                            pass
+                        self.grammar = None
+                        
+            except queue.Empty:
+                pass
+    
+    def publish_result_with_confidence(self, result, source=""):
+        """Publish the final result with confidence score.
+        
+        Args:
+            result: Dictionary containing the vosk result
+            source: Source identifier (topic name or device)
+        """
+        text = result.get('text', '')
+        if not text:
+            return
+        
+        # Calculate average confidence from word-level confidences
+        word_results = result.get('result', [])
+        if word_results:
+            confidences = [word.get('conf', 0.0) for word in word_results]
+            avg_confidence = sum(confidences) / len(confidences)
+        else:
+            avg_confidence = 0.0
+        
+        # Format: "text | confidence: 0.95 | source: /audio/mic1"
+        output = f"{text} | confidence: {avg_confidence:.2f}"
+        if source:
+            output += f" | source: {source}"
+        
+        msg = String()
+        msg.data = output
+        self.pub_result.publish(msg)
+        self.get_logger().info(output)
+    
+    def process_microphone(self):
+        """Process audio from microphone (original behavior)."""
+        try:
+            if not self.device:
+                self.device = None
 
             if not self.samplerate:
                 device_info = sd.query_devices(self.device, "input")
-                # soundfile expects an int, sounddevice provides a float:
                 self.samplerate = int(device_info["default_samplerate"])
-                
-            if not len(self.model):
-                self.model = Model(lang="en-us")
-            else:
-                self.model = Model(lang=self.model)
 
-            with sd.RawInputStream(samplerate=self.samplerate, blocksize = 8000, device=self.device,
-                    dtype="int16", channels=1, callback=self.callback):
+            with sd.RawInputStream(samplerate=self.samplerate, blocksize=8000, device=self.device,
+                    dtype="int16", channels=1, callback=self.microphone_callback):
 
                 if self.grammar:
-                    rec = KaldiRecognizer(
-                        self.model, 
-                        self.samplerate,  
-                        self.grammar)
+                    rec = KaldiRecognizer(self.model, self.samplerate, self.grammar)
                     self.grammar = None
                 else:
-                    rec = KaldiRecognizer(
-                        self.model, 
-                        self.samplerate)
+                    rec = KaldiRecognizer(self.model, self.samplerate)
 
                 while True:
-
                     rclpy.spin_once(self, timeout_sec=0.01)
 
                     data = self.queue.get()
@@ -91,27 +315,31 @@ class VoskNode(Node):
                         continue
 
                     if rec.AcceptWaveform(data):
-                        text = json.loads(rec.Result())['text']
+                        result = json.loads(rec.Result())
+                        self.publish_result_with_confidence(result, self.device or "default")
+                        
                         if self.grammar:
-                            try: obj = json.loads(self.grammar)
-                            except: obj = None
-                            # if returns true, then JSON Array
-                            if isinstance(obj, list):
-                                rec.SetGrammar(self.grammar)
-                            else:
-                                self.get_logger().warn(
-                                    'Param grammar is not a valid JSON array!')
+                            try:
+                                obj = json.loads(self.grammar)
+                                if isinstance(obj, list):
+                                    rec.SetGrammar(self.grammar)
+                                else:
+                                    self.get_logger().warn('Param grammar is not a valid JSON array!')
+                            except:
+                                pass
                             self.grammar = None
-                        if text:
-                            self.publish(self.pub_result, text)
-                            self.get_logger().info(text)
-                    else:
-                        self.publish(self.pub_parcial, rec.PartialResult())
 
         except KeyboardInterrupt:
             self.get_logger().info("Ended stt")
         except Exception as e:
             self.get_logger().error(type(e).__name__ + ": " + str(e))
+    
+    def microphone_callback(self, indata, frames, time, status):
+        """This is called (from a separate thread) for each audio block.
+        """
+        if status:
+            self.get_logger().info(status)
+        self.queue.put(bytes(indata))
 
     def supress_callback(self, msg):
         """Set flag if wave input has to be discared.
