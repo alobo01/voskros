@@ -1,0 +1,26 @@
+# Configuration file for multiple audio topic subscriptions
+# This file specifies which audio topics the voskros node should listen to
+
+# List of audio topics to subscribe to
+# Each topic should publish audio data as Int8MultiArray messages
+# The audio format should be: PCM 16-bit, mono, at the configured sample rate
+audio_topics:
+  - /audio/microphone1
+  - /audio/microphone2
+
+# Sample rate for audio processing (Hz)
+# Common values: 16000, 44100, 48000
+samplerate: 16000
+
+# Model to use for speech recognition
+# This should be the name of a folder in the models/ directory
+# If the model doesn't exist locally, it will be downloaded from alphacephei.com
+model: en-us
+
+# Optional: Path to models directory
+# If not specified, defaults to the models/ folder in the package
+# models_dir: /path/to/custom/models
+
+# Optional: Grammar to restrict recognition to specific words
+# Leave empty for unrestricted recognition
+grammar: ""

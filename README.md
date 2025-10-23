@@ -31,50 +31,112 @@ colcon build
 ## Usage
 
 ```bash
-# get device list
+# get device list (for microphone input mode)
 ros2 run voskros vosk -l
 
-# run node with default parameter
+# run node with default parameter (microphone input)
 ros2 run voskros vosk
 
-# run via launch file
+# run via launch file with specific model
 ros2 launch voskros voskros.launch.yaml model:=fr
 
-# run via launch and overide result output topic
+# run via launch and override result output topic
 ros2 launch voskros voskros.launch.yaml result:=/tts_topic
+
+# run with multiple audio topics (new feature)
+ros2 launch voskros voskros_multi.launch.yaml audio_topics:="['/audio/mic1', '/audio/mic2']"
+
+# run with custom models directory
+ros2 launch voskros voskros.launch.yaml models_dir:=/custom/path/to/models
 ```
+
+### Multi-Microphone Configuration
+
+You can configure multiple audio topics using a YAML configuration file. See `config/audio_topics.yaml` for an example:
+
+```yaml
+audio_topics:
+  - /audio/microphone1
+  - /audio/microphone2
+
+samplerate: 16000
+model: en-us
+```
+
+Then launch with the configuration:
+
+```bash
+ros2 launch voskros voskros_multi.launch.yaml
+```
+
+**Note:** When using multiple audio topics, the node subscribes to ROS topics instead of directly reading from microphone devices. You'll need to publish audio data to these topics using another node (e.g., audio_capture or a custom audio publisher).
+
+For detailed documentation on multi-topic usage, see [docs/MULTI_TOPIC_USAGE.md](docs/MULTI_TOPIC_USAGE.md).
+
+## Helper audio_publisher
+
+For testing the multi-topic feature, an example audio publisher script is included:
+
+```bash
+# Publish a WAV file to an audio topic
+ros2 run voskros audio_publisher <audio_file.wav> <topic_name>
+
+# Example: Publish test.wav to /audio/microphone1
+ros2 run voskros audio_publisher test.wav /audio/microphone1
+```
+
+The audio file should be in WAV format with the following specifications:
+- Format: PCM 16-bit signed integer
+- Channels: Mono (1 channel)  
+- Sample Rate: 16000 Hz (or as configured in the node)
 
 ## Models
 
-During first startup Vosk downloads a small sized default model around 50MB training data. It works quite good on small sized devices. Other custom models can be placed in the cache folder.
+The package now loads models from a local `models/` directory in the package. During first startup, if a model is not found locally, it will be automatically downloaded from https://alphacephei.com/vosk/models.
+
+To manually download and install models:
 
 ```bash
-# list existing models
-ls ~/.cache/vosk
+# Navigate to the models directory
+cd /path/to/voskros/models
+
+# Download a model (example: English US)
+wget https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip
+
+# Extract the model
+unzip vosk-model-small-en-us-0.15.zip
 ```
 
-Find further models and languages here: https://alphacephei.com/vosk/models
+Find more models and languages here: https://alphacephei.com/vosk/models
 
 ## Node VOSK
 
 ### Node Parameter
 
 > ~device (string, default: "")\
-Device to use as input microphone. Leave it empty to use the default input.
+Device to use as input microphone. Leave it empty to use the default input. Note: If audio_topics is specified, this parameter is ignored.
 
-> ~model (string, default: "en")\
-Model to be used. 
+> ~model (string, default: "en-us")\
+Model to be used. The model will be loaded from the local models/ directory.
 
-> ~samplerate (int, default: 0)\
-Sample rate to use.
+> ~samplerate (int, default: 16000)\
+Sample rate to use for audio processing.
+
+> ~audio_topics (string array, default: [])\
+List of ROS audio topics to subscribe to. If specified, the node will subscribe to these topics instead of using a microphone device. Each topic should publish audio data as Int8MultiArray messages.
+
+> ~models_dir (string, default: "")\
+Path to the models directory. If not specified, defaults to the models/ folder in the package.
 
 ### Published Topics
 
 > ~result (std_msgs/String)\
-Detected result text.
+Detected final result text with confidence score and source. Format: "text | confidence: 0.95 | source: /audio/mic1"
 
-> ~partial (std_msgs/String)\
-Detected partial text.
+### Subscribed Topics
+
+> ~audio/topic_name (std_msgs/Int8MultiArray)\
+Audio data from configured topics (when using audio_topics parameter). Audio should be PCM 16-bit, mono, at the configured sample rate.
 
 ### Services
 
