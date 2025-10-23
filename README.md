@@ -71,6 +71,25 @@ ros2 launch voskros voskros_multi.launch.yaml
 
 **Note:** When using multiple audio topics, the node subscribes to ROS topics instead of directly reading from microphone devices. You'll need to publish audio data to these topics using another node (e.g., audio_capture or a custom audio publisher).
 
+For detailed documentation on multi-topic usage, see [docs/MULTI_TOPIC_USAGE.md](docs/MULTI_TOPIC_USAGE.md).
+
+## Helper audio_publisher
+
+For testing the multi-topic feature, an example audio publisher script is included:
+
+```bash
+# Publish a WAV file to an audio topic
+ros2 run voskros audio_publisher <audio_file.wav> <topic_name>
+
+# Example: Publish test.wav to /audio/microphone1
+ros2 run voskros audio_publisher test.wav /audio/microphone1
+```
+
+The audio file should be in WAV format with the following specifications:
+- Format: PCM 16-bit signed integer
+- Channels: Mono (1 channel)  
+- Sample Rate: 16000 Hz (or as configured in the node)
+
 ## Models
 
 The package now loads models from a local `models/` directory in the package. During first startup, if a model is not found locally, it will be automatically downloaded from https://alphacephei.com/vosk/models.

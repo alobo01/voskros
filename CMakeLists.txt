@@ -38,6 +38,7 @@ install(PROGRAMS
   scripts/vosk
   scripts/prompter
   scripts/set_grammar.sh
+  scripts/audio_publisher
   DESTINATION lib/${PROJECT_NAME}
 )
 

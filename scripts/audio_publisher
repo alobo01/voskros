@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Example audio publisher for testing voskros multi-topic support.
+
+This script demonstrates how to publish audio data to topics that voskros can subscribe to.
+In a real application, you would replace this with actual audio capture from microphones.
+"""
+
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import Int8MultiArray
+import numpy as np
+import wave
+import sys
+
+class AudioPublisher(Node):
+    def __init__(self, audio_file, topic_name):
+        super().__init__('audio_publisher')
+        self.publisher = self.create_publisher(Int8MultiArray, topic_name, 10)
+        self.audio_file = audio_file
+        self.topic_name = topic_name
+        
+        # Read WAV file
+        try:
+            with wave.open(audio_file, 'rb') as wf:
+                self.sample_rate = wf.getframerate()
+                self.n_channels = wf.getnchannels()
+                self.sample_width = wf.getsampwidth()
+                self.audio_data = wf.readframes(wf.getnframes())
+                
+            self.get_logger().info(f'Loaded audio file: {audio_file}')
+            self.get_logger().info(f'  Sample rate: {self.sample_rate} Hz')
+            self.get_logger().info(f'  Channels: {self.n_channels}')
+            self.get_logger().info(f'  Sample width: {self.sample_width} bytes')
+            
+        except Exception as e:
+            self.get_logger().error(f'Failed to load audio file: {e}')
+            raise
+        
+        # Publish audio in chunks (8000 bytes per chunk, as in the original code)
+        self.chunk_size = 8000
+        self.current_pos = 0
+        
+        # Timer to publish chunks at the appropriate rate
+        # For 16kHz mono 16-bit: 8000 bytes = 4000 samples = 0.25 seconds
+        chunk_duration = self.chunk_size / (self.sample_rate * self.n_channels * self.sample_width)
+        self.timer = self.create_timer(chunk_duration, self.publish_chunk)
+        
+        self.get_logger().info(f'Publishing to topic: {topic_name}')
+        self.get_logger().info(f'Chunk duration: {chunk_duration:.3f} seconds')
+    
+    def publish_chunk(self):
+        """Publish a chunk of audio data."""
+        if self.current_pos >= len(self.audio_data):
+            self.get_logger().info('Audio playback complete')
+            self.timer.cancel()
+            return
+        
+        # Get next chunk
+        chunk = self.audio_data[self.current_pos:self.current_pos + self.chunk_size]
+        self.current_pos += self.chunk_size
+        
+        # Convert bytes to list of int8 values
+        msg = Int8MultiArray()
+        msg.data = list(chunk)
+        
+        self.publisher.publish(msg)
+        self.get_logger().debug(f'Published chunk: {len(chunk)} bytes')
+
+def main(args=None):
+    if len(sys.argv) < 3:
+        print("Usage: audio_publisher <audio_file.wav> <topic_name>")
+        print("Example: ros2 run voskros audio_publisher test.wav /audio/microphone1")
+        sys.exit(1)
+    
+    audio_file = sys.argv[1]
+    topic_name = sys.argv[2]
+    
+    rclpy.init(args=args)
+    node = AudioPublisher(audio_file, topic_name)
+    
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    
+    node.destroy_node()
+    rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
